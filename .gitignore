@@ -1,0 +1,14 @@
+# Secrets — never commit. Local values live in .env; prod values in the Render dashboard.
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+backend/.venv/
+
+# Build output
+dist/

@@ -1,0 +1,18 @@
+# Web framework + ASGI server
+fastapi
+uvicorn[standard]
+
+# Persistence (ADR-0001: SQLAlchemy 2.x, separate Pydantic schemas — not SQLModel)
+sqlalchemy>=2.0
+psycopg[binary]          # PostgreSQL 16 driver
+
+# Config + validation (pydantic-settings loads the gitignored .env itself)
+pydantic
+pydantic-settings
+
+# Tests
+pytest
+httpx                    # FastAPI TestClient
+
+# Typechecking (run: mypy app from backend/)
+mypy
