@@ -11,11 +11,11 @@ git push / PR → merge to main → GitHub Actions runs pytest → Render builds
 
 | Component | Technology | Hosted where | Config |
 |---|---|---|---|
-| Backend API | FastAPI + SQLModel, packaged as Docker image | Render (web service, Docker environment, auto-deploy from `main`) | `DATABASE_URL` in Render env settings; `.env` locally |
+| Backend API | FastAPI + SQLAlchemy 2.x + Pydantic schemas, packaged as Docker image | Render (web service, Docker environment, root dir `backend/`, auto-deploy from `main`) | `DATABASE_URL` in Render env settings; `.env` locally |
 | Database | PostgreSQL 16 (schema per `database-diagram.md`) | Neon, **EU region (Frankfurt, eu-central-1)** | `DATABASE_URL` connection string |
 | Migrations | Alembic | Run as Render pre-deploy command | `alembic upgrade head` |
 | CI gate | GitHub Actions (pytest) | GitHub, on PRs / merges to `main` | `.github/workflows/tests.yml` |
-| Frontend (MVP) | Static files served by FastAPI (`StaticFiles`) — alternative: separate static host (Vercel/Netlify/Cloudflare Pages) | Same Render service (MVP) or separate | `API_BASE_URL` if split |
+| Frontend (MVP) | Svelte SPA built with Vite; `dist/` served by FastAPI (`StaticFiles`) — alternative: separate static host (Vercel/Netlify/Cloudflare Pages) | Same Render service (MVP) or separate | `API_BASE_URL` if split |
 | Secrets | Never in Git | Local: `.env` (gitignored) / Prod: Render dashboard "Environment" | `.env.example` committed as template |
 
 ---
@@ -48,8 +48,8 @@ Work through these in sequence. Each has: **what to understand → why it matter
 - **Milestone:** connect from local FastAPI (via `.env`) and insert/select a row in `psql` or the Neon SQL editor.
 - **Done when:** `DATABASE_URL` works from both your laptop and (later) Render.
 
-### 5. SQLModel + Alembic — schema & migrations
-- **Understand:** mapping the 7 ER tables (`restaurants`, `booking_rules`, `opening_hours`, `restaurant_tables`, `customers`, `reservations`, `staff_users`) to SQLModel classes; `alembic init`, `alembic revision --autogenerate`, `alembic upgrade head`; why migrations must run **on deploy** (Render pre-deploy command), never by hand-editing the DB; enabling `btree_gist` on Neon for the no-overlap exclusion constraint (AC-02).
+### 5. SQLAlchemy 2.x + Alembic — schema & migrations
+- **Understand:** mapping the 10 ER tables (`restaurants`, `booking_rules`, `opening_hours`, `table_enclaves`, `restaurant_tables`, `staff_users`, `customers`, `reservations`, `reservation_table_allocations`, `table_notes`) to SQLAlchemy 2.x models with separate Pydantic schemas (see ADR-0001); `alembic init`, `alembic revision --autogenerate`, `alembic upgrade head`; why migrations must run **on deploy** (Render pre-deploy command), never by hand-editing the DB; enabling `btree_gist` on Neon for the no-overlap exclusion constraint (AC-02). Demo seed data lives in a separate idempotent seed script (`backend/scripts/seed.py`), NOT in migrations; the retention job is `backend/app/services/retention.py` + `backend/scripts/cleanup.py`.
 - **Why:** the PRD note in §14 asks for "a fixed way to run database migrations, e.g. Alembic" — this is it.
 - **Milestone:** generate the initial migration from the models, run it against a Neon dev branch, verify tables exist.
 - **Done when:** `alembic upgrade head` creates the full schema from an empty database.
@@ -101,13 +101,20 @@ Work through these in sequence. Each has: **what to understand → why it matter
 ## 3. Files this plan will produce in this repo
 
 ```
-├── Dockerfile                  # multi-stage FastAPI image, uvicorn on $PORT
-├── .dockerignore               # .env, __pycache__, .git, etc.
+├── backend/
+│   ├── app/                    # api/ config/ schemas/ models/ repositories/ services/ security/ database/ main.py
+│   ├── tests/                  # unit + integration + concurrency + e2e; tests/perf/ = k6 (50 VU, 5 min, warm p95 < 1s)
+│   ├── migrations/             # alembic; pre-deploy runs `alembic upgrade head`
+│   ├── scripts/seed.py         # idempotent demo seed (1 restaurant, 2 enclaves, 7 tables, 1 staff) — NOT a migration
+│   ├── scripts/cleanup.py      # runs the 90-day anonymization retention job (manual + scheduled)
+│   ├── requirements.txt
+│   └── Dockerfile              # multi-stage: Node builds frontend dist/, python:3.12-slim runs uvicorn on $PORT
+├── frontend/                   # Svelte + Vite SPA
+├── docs/
 ├── docker-compose.yml          # local dev: app + postgres:16
 ├── .env                        # LOCAL ONLY (gitignored) — DATABASE_URL=postgresql://...localhost...
 ├── .env.example                # committed template with placeholders
-├── render.yaml                 # Render service as code (optional but recommended)
-├── alembic.ini + alembic/      # migrations; pre-deploy runs `alembic upgrade head`
+├── render.yaml                 # Render service as code (optional but recommended); service root dir = backend/
 └── .github/workflows/tests.yml # pytest on PRs / merges to main
 ```
 
@@ -126,7 +133,7 @@ Work through these in sequence. Each has: **what to understand → why it matter
 
 - Render: "Deploy a FastAPI app" / Docker deployment guide, env vars guide, free-tier cold-start docs, `render.yaml` reference → render.com/docs
 - Neon: quickstart, connection string / `sslmode=require`, database branching, EU regions → neon.tech/docs
-- Alembic + SQLModel: Alembic tutorial, SQLModel docs (FastAPI integration) → sqlmodel.tiangolo.com, alembic.sqlalchemy.org
+- Alembic + SQLAlchemy 2.x: Alembic tutorial, SQLAlchemy docs → alembic.sqlalchemy.org, docs.sqlalchemy.org
 - Docker: Dockerfile reference, docker compose docs → docs.docker.com
 - GitHub Actions: "Python CI with pytest", branch protection docs → docs.github.com
 - GDPR angle for a Danish system: EU region choice on Neon; DPA requirements (Datatilsynet guidance)

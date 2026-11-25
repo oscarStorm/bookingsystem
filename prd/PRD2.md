@@ -7,7 +7,8 @@
 
 This document consolidates every decision reached in the design review (grilling session).
 Where it conflicts with `PRD.md`, this document wins. Source of truth for seating/allocation
-policy details: `database-diagram/restaurant_booking_policies.md` + `database-diagram/ER-diagram.png`.
+policy details: `database-diagram/booking_policies.2.0.md` + `database-diagram/ER-diagram.2.0.svg`.
+Domain vocabulary: `GLOSSARY.md`; hard-to-reverse decisions: `docs/adr/`.
 
 ---
 
@@ -34,8 +35,8 @@ containerized FastAPI + PostgreSQL application.
 - Create / cancel reservations; customer self-cancel via `manage_token` link
 - Confirmation email containing the cancellation link (one email per reservation)
 - Protected admin interface (cookie session)
-- Configurable tables, opening hours and booking rules — stored in DB, seeded via migrations,
-  read dynamically by the backend (no hardcoding)
+- Configurable tables, opening hours and booking rules — stored in DB, seeded via an idempotent
+  seed script kept separate from schema migrations, read dynamically by the backend (no hardcoding)
 - Enclave-based automatic table allocation, including automatic combining of tables within one
   enclave for online bookings, and allocator-driven reassignment of unlocked future reservations
 - Staff table reassignment of existing reservations (in place, atomic)
@@ -66,19 +67,21 @@ containerized FastAPI + PostgreSQL application.
 | F-07 | Staff views reservations, filterable by date | Must |
 | F-08 | Staff cancels a reservation | Must |
 | F-09 | Tables, opening hours, booking rules configurable via DB seed; read dynamically | Must |
-| F-10 | Staff creates manual bookings (phone / walk-in) with policy overrides | Should |
+| F-10 | Staff creates manual bookings (phone / walk-in) with policy overrides | Must |
 | F-11 | General reservation editing | Could (deferred) |
 | F-12 | Restaurant settings editable in admin UI | Could (deferred; seed instead) |
-| F-13 | Confirmation email with `manage_token` cancellation link, sent once after commit; delivery failure never blocks the booking | Must |
-| F-14 | Staff reassigns a reservation's table(s) in place — one transaction, locks tables, validates availability; preserves reservation id and manage_token | Must \* |
-| F-15 | Customer optional free-text note (`customer_note`), visible to staff | Should \* |
-| F-16 | Staff notes on tables (`TABLE_NOTES`, optional expiry; never block capacity) | Could \* |
+| F-13 | Confirmation email with `manage_token` cancellation link, sent once after commit; delivery failure never blocks the booking | Should |
+| F-14 | Staff reassigns a reservation's table(s) in place — one transaction, locks tables, validates availability; preserves reservation id and manage_token | Should |
+| F-15 | Customer optional free-text note (`customer_note`), visible to staff | Could |
+| F-16 | Staff notes on tables (`TABLE_NOTES`, optional expiry; never block capacity) | Could |
 | F-17 | Automatic allocation: best-fit single table or combined tables within one enclave (online, ≤ 6 guests) | Must |
-| F-18 | Allocator may reassign tables of existing **unlocked, not-yet-started** reservations to make room, minimizing moves | Should \* |
-| F-19 | `is_locked` flag — staff-only, protects a reservation from (auto) reassignment | Should \* |
+| F-18 | Allocator may reassign tables of existing **unlocked, not-yet-started** reservations to make room, minimizing moves | Must |
+| F-19 | `is_locked` flag — staff-only, protects a reservation from (auto) reassignment | Should |
 | F-20 | Customer self-cancel via manage_token link (no account) | Must |
 
-\* Priority recommended in design review; final ranking pending (see open items).
+Final ranking (design review round 5): Must = F-01–F-10, F-17, F-18, F-20; Should = F-13, F-14,
+F-19; Could = F-15, F-16 (F-11/F-12 deferred). The allocator respects `is_locked` from the start,
+even if the locking UI ships later.
 
 ## 5. Use cases
 
@@ -125,7 +128,7 @@ containerized FastAPI + PostgreSQL application.
 
 | ID | Rule |
 |---|---|
-| B-01 | Reservations must fit entirely within `[open_time, close_time]` on an open weekday. `close_time` must be ≥ 22:30 for the full second-seating window (20:30 + 120 min). An `open_time` earlier than 17:30 creates no earlier slots. A weekday with no `OPENING_HOURS` row is closed. |
+| B-01 | On an open weekday a reservation must start at or after `open_time` and **strictly before `kitchen_close_time`**, and end by `close_time`. The kitchen cutoff applies to ALL reservations, including staff bookings. The buffer never extends a stay past closing. If `close_time` ≤ `open_time`, closing is the following day (00:00 = next midnight). A weekday with no `OPENING_HOURS` row is closed. |
 | B-02 | Online bookings: 1–6 guests (`max_online_party_size`). Larger parties are directed to phone/email contact. |
 | B-03 | Allocation must provide aggregate capacity ≥ party size — one table, or several tables in the same enclave. |
 | B-04 | Online reservation duration is 120 min (`reservation_duration_minutes`); staff may override with `override_reason`. |
@@ -150,11 +153,14 @@ containerized FastAPI + PostgreSQL application.
 4. PostgreSQL `EXCLUDE USING gist (table_id WITH =, tstzrange(protected_from, protected_until) WITH &&) WHERE (is_active)`
    on `RESERVATION_TABLE_ALLOCATIONS` is the hard DB-level guarantee (requires `btree_gist`).
 5. Enclaves: `enclave_id NULL` = not joinable; same non-NULL enclave = joinable. Allocator
-   prefers best-fit, capacity-efficient arrangements; `allocation_priority` (lower = preferred)
-   breaks ties; minimize moves of existing reservations.
-6. `is_locked` is writable only via staff endpoints (app-level enforcement); locked or started
-   reservations are never auto-moved. Customers are never notified of table changes (they never
-   chose a table) and cannot alter allocations or `is_locked`.
+   preference order: (1) valid capacity/availability on every candidate table, (2) preserve useful
+   table combinations, (3) minimize reassignment of existing reservations, (4) minimize unused
+   seating capacity, (5) `allocation_priority` (lower = preferred) as tie-breaker. Availability
+   queries may simulate reassignment plans but never apply them.
+6. `is_locked` is writable only via staff endpoints (app-level enforcement). Locked and
+   already-started reservations are never moved — automatically, and in the MVP also not manually.
+   Reassigned reservations keep id, times, customer, and manage token. Customers are never notified
+   of table changes (they never chose a table) and cannot alter allocations or `is_locked`.
 
 ## 9. Non-functional requirements
 
@@ -185,11 +191,12 @@ After 90 days (single-transaction job, runnable/documented — not hand-run SQL)
 
 ## 11. Data model (summary)
 
-10 tables (see `database-diagram/ER-diagram.png`): `RESTAURANTS`, `BOOKING_RULES` (1:1),
-`OPENING_HOURS`, `TABLE_ENCLAVES`, `RESTAURANT_TABLES` (with `enclave_id`, `allocation_priority`),
+10 tables (see `database-diagram/ER-diagram.2.0.svg`): `RESTAURANTS`, `BOOKING_RULES` (1:1),
+`OPENING_HOURS` (`open_time`, `kitchen_close_time`, `close_time`), `TABLE_ENCLAVES`,
+`RESTAURANT_TABLES` (with `enclave_id`, `allocation_priority`),
 `STAFF_USERS`, `CUSTOMERS`, `RESERVATIONS` (incl. `source`, `is_locked`, `customer_note`,
-`override_reason`, `manage_token` UNIQUE NULL, `email_sent_at`, `anonymized_at` — **column to be
-added to the ER diagram**), `RESERVATION_TABLE_ALLOCATIONS` (`protected_from`, `protected_until`,
+`override_reason`, `manage_token` UNIQUE NULL, `email_sent_at`, `anonymized_at`),
+`RESERVATION_TABLE_ALLOCATIONS` (`protected_from`, `protected_until`,
 `is_active`), `TABLE_NOTES`.
 
 Key constraints: `UNIQUE(BOOKING_RULES.restaurant_id)`, `UNIQUE(RESTAURANT_TABLES(restaurant_id, table_number))`,
@@ -199,6 +206,18 @@ Key constraints: `UNIQUE(BOOKING_RULES.restaurant_id)`, `UNIQUE(RESTAURANT_TABLE
 `source ∈ {'online','phone','walk_in'}`; online ⇒ `created_by_staff_id IS NULL AND manage_token IS NOT NULL`;
 staff-created ⇒ `created_by_staff_id IS NOT NULL AND manage_token IS NULL`. All table/enclave IDs in an
 allocation must belong to the reservation's restaurant.
+
+### Seed dataset (MVP demo — idempotent seed script, separate from migrations)
+
+- **Restaurant:** id 1, "Demo Restaurant", timezone `Europe/Copenhagen`, horizon 30 days
+- **Enclaves:** 1 "Enclave 1" (combined capacity 6), 2 "Enclave 2" (combined capacity 4)
+- **Tables:** #1 cap 4, enclave NULL, priority 40 · #2 cap 2, NULL, 10 · #3 cap 2, E1, 30 ·
+  #4 cap 2, E1, 31 · #5 cap 2, E1, 32 · #6 cap 2, E2, 20 · #7 cap 2, E2, 21
+- **Opening hours:** Monday closed (no row); Tue–Sun open 17:30, kitchen close 21:00, close 00:00 (next day)
+- **Booking rules:** first seating 17:30–18:15, duration 120, buffer 15, slot interval 15,
+  max online party size 6, max seatings per table 2, horizon 30 (second window derives to 19:45–20:30)
+- **Staff:** `admin@demo-restaurant.example`, role `admin`, Argon2id hash of a password supplied
+  via environment variable (never hardcoded)
 
 ## 12. Technology & architecture
 
@@ -224,6 +243,41 @@ Database: PostgreSQL 16 on Neon, EU region Frankfurt (eu-central-1), sslmode=req
 - CI: GitHub Actions runs pytest on PRs / merges to `main`; `main` branch-protected (green PRs only).
 - Deploy: merge to `main` → Render builds Docker image → pre-deploy `alembic upgrade head` →
   live at `https://<app>.onrender.com`. Free-tier cold start documented as MVP limitation.
+
+The system project structure should look like this:
+    booking-system/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── config/
+│   │   ├── schemas/
+│   │   ├── models/
+│   │   ├── repositories/
+│   │   ├── services/
+│   │   ├── security/
+│   │   ├── database/
+│   │   └── main.py
+│   ├── tests/
+│   ├── migrations/
+│   ├── requirements.txt
+│   └── Dockerfile
+├── frontend/
+├── docs/
+├── docker-compose.yml
+└── README.md
+
+Directory	Responsibility
+api/	REST endpoints and controllers
+config/	Application configuration
+schemas/	DTOs and Pydantic validation models
+models/	SQLAlchemy entities
+repositories/	Database queries and persistence
+services/	Business logic and business rules
+security/	Authentication and authorization
+database/	Database connections and sessions
+tests/	Unit, integration and acceptance tests
+migrations/	Database schema migrations
+
 
 ## 13. Test strategy
 
@@ -255,10 +309,10 @@ performance (k6 spec in NF-09) · retention job test (AC-07). Test cases derive 
    PostgreSQL on Neon Frankfurt; `DATABASE_URL` in `.env` locally and Render env settings.
 8. Performance limits: NF-09 as specified above (k6, 50 VU, 5 min, warm p95 < 1 s).
 
-## Appendix — files still referencing outdated decisions (update after design review closes)
+## Appendix — cross-references
 
-- `deployment/deployment-plan.md`: says "SQLModel" and "7 ER tables" → SQLAlchemy 2.x, 10 tables
-- `database-diagram/ER-diagram.png`: add `RESERVATIONS.anonymized_at`
-- New `GLOSSARY.md` (seating, enclave, protected interval, manage_token, allocation, lock, anonymization)
-  and ADRs for the hard-to-reverse decisions (EXCLUDE+lock concurrency model, enclave allocation,
-  immutability-with-table-reassignment, email-in-scope, retention/anonymization) to be written
+- Domain vocabulary: `GLOSSARY.md`; hard-to-reverse decisions: `docs/adr/0001`–`0012`
+- Policy details and schema: `database-diagram/booking_policies.2.0.md`, `database-diagram/ER-diagram.2.0.svg`
+  (the earlier `ER-diagram.png` / `restaurant_booking_policies*.md` are superseded)
+- Naming: the ER column is `max_online_party_size` (an earlier note said `max_party_size` — ER name is canonical)
+- Spec for implementation: `.scratch/restaurant-booking-mvp/spec.md`
