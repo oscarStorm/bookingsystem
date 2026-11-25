@@ -4,7 +4,11 @@ uvicorn[standard]
 
 # Persistence (ADR-0001: SQLAlchemy 2.x, separate Pydantic schemas — not SQLModel)
 sqlalchemy>=2.0
+alembic                  # migrations; pre-deploy runs `alembic upgrade head`
 psycopg[binary]          # PostgreSQL 16 driver
+
+# Security (ADR-0010: Argon2id password hashes)
+argon2-cffi
 
 # Config + validation (pydantic-settings loads the gitignored .env itself)
 pydantic
