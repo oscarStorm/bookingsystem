@@ -1,9 +1,10 @@
 """All ORM models. Importing this package registers every table on Base.metadata."""
 
 from .base import Base
-from .people import Customer, StaffUser
+from .customer import Customer
 from .reservation import Reservation, ReservationTableAllocation
 from .restaurant import BookingRules, OpeningHours, Restaurant
+from .staff import StaffUser
 from .tables import RestaurantTable, TableEnclave, TableNote
 
 __all__ = [
