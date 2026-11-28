@@ -1,6 +1,9 @@
 # Secrets — never commit. Local values live in .env; prod values in the Render dashboard.
 .env
 
+# Local dev database (user-space PostgreSQL install + data dir) — see scripts/db-*.sh
+.pg/
+
 # Python
 __pycache__/
 *.py[cod]
