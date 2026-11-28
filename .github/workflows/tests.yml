@@ -19,10 +19,10 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
+          --health-cmd "pg_isready -U postgres -d testdb"
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +35,26 @@ jobs:
       - name: Install dependencies
         run: pip install -r backend/requirements.txt
 
+      - name: Wait for PostgreSQL
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/testdb
+        run: |
+          python -c "
+          import os, time, psycopg
+          for i in range(30):
+              try:
+                  with psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=3):
+                      print('PostgreSQL is up'); break
+              except Exception as e:
+                  time.sleep(2)
+          else:
+              raise SystemExit('PostgreSQL never became reachable')
+          "
+
       - name: Run pytest
         working-directory: backend
         env:
           DATABASE_URL: postgresql+psycopg://postgres:postgres@localhost:5432/testdb
           SECRET_KEY: ci-only-secret-key
           ENVIRONMENT: test
-        run: pytest
+        run: pytest -v --tb=short
